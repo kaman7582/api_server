@@ -10,7 +10,6 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from fastapi import FastAPI,BackgroundTasks
 from pydantic import BaseModel
-
 import os
 import numpy as np
 import joblib 
@@ -97,7 +96,9 @@ def calculate_prediction(raw_data,model_name,scaler_path,history_days,predict_da
         std_data=np.array(raw_data).reshape(-1, 1)
         std_data = my_scaler.fit_transform(std_data)
         model = load_model(model_name)
-        trainx,_ = split_data(std_data,history_days,predict_days)
+        #trainx,_ = split_data(std_data,history_days,predict_days)
+        #print(trainx.shape)
+        trainx = std_data[-history_days:,:].reshape(1,history_days,1)
         result = model.predict(trainx)
         result  = my_scaler.inverse_transform(result)
         return result
@@ -182,6 +183,7 @@ def get_host_ip():
     return ip
 
 if __name__=='__main__':
+    '''
     import uvicorn
     try:
         f= open("config.json", 'r')
@@ -203,7 +205,7 @@ if __name__=='__main__':
         json_data = json.load(f)
     
     print( gas_data_process(json_data['oilData'],'p'))
-    '''
+    
 
 #config in json ,server ip , port
 #config in json, receive json message format
