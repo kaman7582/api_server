@@ -8,28 +8,37 @@ from keras.layers import LSTM
 from keras.models import load_model
 from datetime import datetime
 import matplotlib.pyplot as plt
+from fastapi import FastAPI,BackgroundTasks
+from pydantic import BaseModel
+
 import os
 import numpy as np
 import joblib 
-from fastapi import FastAPI
-from pydantic import BaseModel
 import socket
+import json
+import sys
+
+def is_number(s):
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
 
 def ensure_float(x):
     if isinstance(x,np.float):
         return x
-    else :
+    elif is_number(x):
+        return float(x)
+    else:   
         return np.nan
 
-data_name_list=['h2','c2h2','totalGasppm']
+data_name_list=['h2','c2h2','tothyd']
 train_group={'day':[3,1],'week':[21,7],'half':[30,14],'month':[60,30]}
 sensor_name='sensorId'
 
 class gis_msg(BaseModel):
-    msg:str
-    code:int
-    data:list
-    size:int
+    oilData:list
 
 def series_to_supervised(data, n_in=1, n_out=1, dropnan=True):
         df = DataFrame(data)
@@ -52,7 +61,7 @@ def process_raw_data(raw_data):
     #valid_data=raw_data['data']
     cols=list()
     sensor_id=0
-    frame = DataFrame(raw_data,columns=['creatTime','h2','c2h2','totalGasppm','sensorId']).dropna()
+    frame = DataFrame(raw_data,columns=['creatTime','h2','c2h2','tothyd','sensorId']).dropna()
     sensor_id = frame[sensor_name].drop_duplicates().values
     if len(sensor_id)>0:
         sensor_id = str(sensor_id[0])
@@ -63,8 +72,10 @@ def process_raw_data(raw_data):
     for g_name in data_name_list:
         frame[g_name] = frame[g_name].apply(lambda x: ensure_float(x))
         frame[g_name] = frame[g_name].dropna()
+        #print(frame[g_name])
         cols.append(frame.groupby('creatTime')[g_name].mean())
     agg = concat(cols, axis=1)
+    #agg.ix[~(agg==0).all(axis=1), :]
     return agg,sensor_id
 
 def standard_data(data):
@@ -82,12 +93,6 @@ def split_data(data,history_val,predict_val):
 
 
 def calculate_prediction(raw_data,model_name,scaler_path,history_days,predict_days):
-        #wrong json message
-        if os.path.exists(model_name) == False or os.path.exists(scaler_path) == False:
-            return 'No find model'
-        if(len(raw_data) < history_days):
-            return 'Data too short'
-        #load the latest model
         my_scaler = joblib.load(scaler_path)
         std_data=np.array(raw_data).reshape(-1, 1)
         std_data = my_scaler.fit_transform(std_data)
@@ -95,19 +100,18 @@ def calculate_prediction(raw_data,model_name,scaler_path,history_days,predict_da
         trainx,_ = split_data(std_data,history_days,predict_days)
         result = model.predict(trainx)
         result  = my_scaler.inverse_transform(result)
-        #plt.plot(raw_data,'b')
-        ##plt.plot(result,'r')
-        ##plt.show()
-        #exit(0)
         return result
 
 def gas_data_process(raw_data,param):
     mean_data,sensor_id = process_raw_data(raw_data)
     predict_result={}
     if(sensor_id == -1):
+        print("Sensor id not find")
         return {"Result":"No sensor ID"}
     for gas_name in data_name_list:
         gas_val = mean_data[gas_name].values
+        #if gas is almost zero
+        #np.count_nonzero(gas_val)
         std_val,scaler= standard_data(gas_val)
         days_map={}
         for date_key in train_group.keys():
@@ -127,40 +131,45 @@ def gas_data_process(raw_data,param):
                 #model.save(back_up_name)
                 joblib.dump(scaler, scaler_path)
             elif (param == 'p'):
+                if os.path.exists(model_name) == False or os.path.exists(scaler_path) == False:
+                    return {'Prediction Result':'No find AI model'}
+                if(len(gas_val) < history_val):
+                    return {'Prediction Result':'Input data too short'}
+                #print(model_name)
                 results = calculate_prediction(gas_val,model_name,scaler_path,history_val,predict_val)
-                days_map[date_key]=results[-1,:].tolist()
+                rlist = results[-1,:].tolist()
+                rlist = [("%.2f" % abs(i)) for i in rlist]
+                days_map[date_key]=rlist
         if (param == 'p'):
             predict_result[gas_name] = days_map
     
     if param == 'p':
         return {'Prediction Result':predict_result}
     elif param == 't':
+        print("Training done")
         return {'Training Result':'Done'}
 
 app = FastAPI()
 
 @app.post('/train')
-async def train_user_data(train_data:gis_msg):
-    if(len(train_data.data) != train_data.size  ):
-        return {'Training Result':'Data length incorrect'}
-    if(len(train_data.data)==0 or train_data.size == 0):
-        return {'Training Result':'Data empty'}
-    return gas_data_process(train_data.data,'t')
+async def train_user_data(train_data:gis_msg,background_tasks: BackgroundTasks):
+    if(len(train_data.oilData) < 60 ):
+        return {'Training Result':'Data too short'}
+    background_tasks.add_task(gas_data_process, train_data.oilData,'t')
+    return {"Training Result":"Done"}
+    
+
 
 @app.post('/predict')
 async def predict_oil_data(train_data:gis_msg):
-    if(len(train_data.data) != train_data.size  ):
-        return {'Prediction Result':'Data length incorrect'}
-    if(len(train_data.data)==0 or train_data.size == 0):
-        return {'Prediction Result':'Data empty'}
-    #print(train_data.data)
-    return gas_data_process(train_data.data,'p')
+    if(len(train_data.oilData) < 60  ):
+        return {'Prediction Result':'Data too short'}
+    return gas_data_process(train_data.oilData,'p')
      
 
 @app.get("/")
 def read_root():
     return {"GIS":"AI System"}
-
 def get_host_ip(): 
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -174,10 +183,27 @@ def get_host_ip():
 
 if __name__=='__main__':
     import uvicorn
-    ip_addr = get_host_ip()
-    uvicorn.run(app, host=ip_addr, port=8000)
-    #import json
-    #with open("msg.json", 'r') as f:
-    #    json_data = json.load(f)
+    try:
+        f= open("config.json", 'r')
+        j_msg = json.load(f)
+        serv_info = j_msg['server_info']
+        ip_addr = serv_info['ip']
+        bind_port = int(serv_info['port'])
+    except:
+        if( len(sys.argv)>2):
+            ip_addr = sys.argv[1]
+            bind_port = int(sys.argv[2])
+        else:
+            ip_addr = get_host_ip()
+            bind_port = 8000
+    uvicorn.run(app, host=ip_addr, port=bind_port)
+    '''
+    import json
+    with open("new.txt", 'r') as f:
+        json_data = json.load(f)
     
-    #print(gas_data_process(json_data['data'],'p'))
+    print( gas_data_process(json_data['oilData'],'p'))
+    '''
+
+#config in json ,server ip , port
+#config in json, receive json message format
