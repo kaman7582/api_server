@@ -33,7 +33,7 @@ def ensure_float(x):
         return np.nan
 
 data_name_list=['h2','c2h2','tothyd']
-train_group={'day':[3,1],'week':[21,7],'half':[30,14],'month':[60,30]}
+train_group={'day':[3,1],'week':[21,7],'2weeks':[30,14],'month':[60,30]}
 sensor_name='sensorId'
 
 class gis_msg(BaseModel):
@@ -102,10 +102,28 @@ def calculate_prediction(raw_data,model_name,scaler_path,history_days,predict_da
         result = model.predict(trainx)
         result  = my_scaler.inverse_transform(result)
         return result
-
-def gas_data_process(raw_data,param):
+    
+def gas_data_predict(raw_data,date_key):
     mean_data,sensor_id = process_raw_data(raw_data)
     predict_result={}
+    for gas_name in data_name_list:
+        gas_val = mean_data[gas_name].values
+        model_name = 'models/{}/{}/{}_{}.h5'.format(sensor_id,gas_name,sensor_id,date_key)
+        scaler_path='models/{}/{}/{}.save'.format(sensor_id,gas_name,sensor_id)
+        history_val,predict_val = train_group[date_key]
+        #if gas model does not find
+        if os.path.exists(model_name) == False or os.path.exists(scaler_path) == False:
+                #return {'Prediction Result':'No find AI model'}
+                predict_result[gas_name]='No find AI model'
+        else:
+            results = calculate_prediction(gas_val,model_name,scaler_path,history_val,predict_val)
+            rlist = results[-1,:].tolist()
+            rlist = [("%.2f" % abs(i)) for i in rlist]
+            predict_result[gas_name]=rlist
+    return {date_key:predict_result}
+
+def gas_data_train(raw_data):
+    mean_data,sensor_id = process_raw_data(raw_data)
     if(sensor_id == -1):
         print("Sensor id not find")
         return {"Result":"No sensor ID"}
@@ -114,63 +132,62 @@ def gas_data_process(raw_data,param):
         #if gas is almost zero
         #np.count_nonzero(gas_val)
         std_val,scaler= standard_data(gas_val)
-        days_map={}
         for date_key in train_group.keys():
-            time_gap=train_group[date_key]
-            history_val = time_gap[0]
-            predict_val = time_gap[1]
+            history_val,predict_val = train_group[date_key]
             trainx,trainy=split_data(std_val,history_val,predict_val)
             model_name = 'models/{}/{}/{}_{}.h5'.format(sensor_id,gas_name,sensor_id,date_key)
             scaler_path='models/{}/{}/{}.save'.format(sensor_id,gas_name,sensor_id)
-            if(param == 't'):
-                model = Sequential()
-                model.add(LSTM(128, input_shape=(trainx.shape[1], trainx.shape[2])))
-                model.add(Dense(predict_val))
-                model.compile(loss='mae', optimizer='adam')
-                model.fit(trainx,trainy,epochs=50,batch_size=50,verbose=2 ,shuffle=False)
-                model.save(model_name)
+            model = Sequential()
+            model.add(LSTM(128, input_shape=(trainx.shape[1], trainx.shape[2])))
+            model.add(Dense(predict_val))
+            model.compile(loss='mae', optimizer='adam')
+            model.fit(trainx,trainy,epochs=50,batch_size=50,verbose=2 ,shuffle=False)
+            model.save(model_name)
                 #model.save(back_up_name)
-                joblib.dump(scaler, scaler_path)
-            elif (param == 'p'):
-                if os.path.exists(model_name) == False or os.path.exists(scaler_path) == False:
-                    return {'Prediction Result':'No find AI model'}
-                if(len(gas_val) < history_val):
-                    return {'Prediction Result':'Input data too short'}
-                #print(model_name)
-                results = calculate_prediction(gas_val,model_name,scaler_path,history_val,predict_val)
-                rlist = results[-1,:].tolist()
-                rlist = [("%.2f" % abs(i)) for i in rlist]
-                days_map[date_key]=rlist
-        if (param == 'p'):
-            predict_result[gas_name] = days_map
-    
-    if param == 'p':
-        return {'Prediction Result':predict_result}
-    elif param == 't':
-        print("Training done")
-        return {'Training Result':'Done'}
+            joblib.dump(scaler, scaler_path)
+    print("Training done")
+    return {'Training Result':'Done'}
 
 app = FastAPI()
 
 @app.post('/train')
 async def train_user_data(train_data:gis_msg,background_tasks: BackgroundTasks):
-    if(len(train_data.oilData) < 60 ):
+    if(len(train_data.oilData) < train_group['month'][0] ):
         return {'Training Result':'Data too short'}
-    background_tasks.add_task(gas_data_process, train_data.oilData,'t')
-    return {"Training Result":"Done"}
+    #background_tasks.add_task(gas_data_process, train_data.oilData,'t')
+    #return {"Training Result":"Done"}
+    return gas_data_train(train_data.oilData)
     
 
 
-@app.post('/predict')
+@app.post('/predict_day')
 async def predict_oil_data(train_data:gis_msg):
-    if(len(train_data.oilData) < 60  ):
+    if(len(train_data.oilData) < train_group['day'][0]):
         return {'Prediction Result':'Data too short'}
-    return gas_data_process(train_data.oilData,'p')
-     
+    return gas_data_predict(train_data.oilData,'day')
+
+@app.post('/predict_week')
+async def predict_oil_data(train_data:gis_msg):
+    if(len(train_data.oilData) < train_group['week'][0]):
+        return {'Prediction Result':'Data too short'}
+    return gas_data_predict(train_data.oilData,'week')
+
+@app.post('/predict_2weeks')
+async def predict_oil_data(train_data:gis_msg):
+    if(len(train_data.oilData) < train_group['2weeks'][0]):
+        return {'Prediction Result':'Data too short'}
+    return gas_data_predict(train_data.oilData,'2weeks')
+
+@app.post('/predict_month')
+async def predict_oil_data(train_data:gis_msg):
+    if(len(train_data.oilData) < train_group['month'][0]):
+        return {'Prediction Result':'Data too short'}
+    return gas_data_predict(train_data.oilData,'month')
+
 
 @app.get("/")
 def read_root():
-    return {"GIS":"AI System"}
+    return {"GIS":"AI System Server Start"}
 def get_host_ip(): 
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -183,7 +200,6 @@ def get_host_ip():
     return ip
 
 if __name__=='__main__':
-    '''
     import uvicorn
     try:
         f= open("config.json", 'r')
@@ -203,9 +219,8 @@ if __name__=='__main__':
     import json
     with open("new.txt", 'r') as f:
         json_data = json.load(f)
-    
     print( gas_data_process(json_data['oilData'],'p'))
-    
+    '''
 
 #config in json ,server ip , port
 #config in json, receive json message format
